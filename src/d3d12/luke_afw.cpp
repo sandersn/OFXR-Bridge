@@ -424,6 +424,25 @@ bool compatible_color(const D3D12_RESOURCE_DESC& left,
         right.SampleDesc.Count == 1;
 }
 
+std::optional<D3D12_RESOURCE_DESC> osr_color_description(
+    const D3D12_RESOURCE_DESC& source, const D3D12_RESOURCE_DESC& destination,
+    bool native_osr) noexcept {
+    auto matching_destination = destination;
+    if (native_osr) {
+        matching_destination.Width = source.Width;
+        matching_destination.Height = source.Height;
+    }
+    if (!compatible_color(source, matching_destination) ||
+        !source.Width || !source.Height || !destination.Width || !destination.Height ||
+        source.Width > INT_MAX || source.Height > INT_MAX ||
+        destination.Width > INT_MAX || destination.Height > INT_MAX)
+        return {};
+    auto common = source;
+    common.Width = std::min(source.Width, destination.Width);
+    common.Height = std::min(source.Height, destination.Height);
+    return common;
+}
+
 enum class ColorFormatGroup {
     none,
     rgba8,
@@ -502,6 +521,8 @@ struct LukeAfwSynthesizer::Impl {
     bool gpu_timing_initialized{};
     EyeFrameBuffers eye_buffers{};
     AfwColorScale color_scale;
+    AfwColorScale osr_source_scale;
+    std::array<AfwColorScale, 2> osr_destination_scale;
     OsrHoleFill osr; // OSR stereo hole fill, same inputs as the provider
     OsrFullWarp osr_full; // Full OSR: the layer's own peer-eye reconstruction, same inputs
     UINT work_width{},work_height{},quality_divisor{1};
@@ -1521,8 +1542,9 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             return E_INVALIDARG;
         report_stage(AfwStage::arguments_valid, S_OK, source_eye,
             guide.publication);
-        const auto color_desc = source_color->GetDesc();
+        const auto source_desc = source_color->GetDesc();
         const auto destination_desc = destination_color->GetDesc();
+        auto color_desc = source_desc;
         const auto depth_desc = guide.depth->GetDesc();
         const auto motion_desc = guide.motion_vectors->GetDesc();
         const std::uint64_t color_extent =
@@ -1577,8 +1599,11 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             }
             return DXGI_ERROR_UNSUPPORTED;
         };
-        if (!compatible_color(color_desc, destination_desc)) return reject_input(1);
-        if (color_desc.Width > INT_MAX || color_desc.Height > INT_MAX) return reject_input(2);
+        const auto common_color = osr_color_description(source_desc, destination_desc,
+            settings.osr == static_cast<int>(OsrReconstruction::full));
+        if (!common_color) return reject_input(1);
+        color_desc = *common_color;
+        const bool normalize_color = !compatible_color(source_desc, destination_desc);
         if (!guide.motion_width || !guide.motion_height || !guide.output_width || !guide.output_height)
             return reject_input(3);
         if (luke_motion_srv_format(motion_desc.Format) == DXGI_FORMAT_UNKNOWN) return reject_input(5);
@@ -2003,6 +2028,16 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
         if (FAILED(result)) return result;
         report_stage(AfwStage::resources_ready, S_OK, source_eye,
             guide.publication);
+        if (normalize_color) {
+            result = impl_->osr_source_scale.prepare(impl_->device.Get(),
+                static_cast<UINT>(color_desc.Width), color_desc.Height,
+                linear_color_format(color_desc.Format));
+            if (FAILED(result)) return result;
+            result = impl_->osr_destination_scale[1U - source_eye].prepare(impl_->device.Get(),
+                static_cast<UINT>(destination_desc.Width), destination_desc.Height,
+                linear_color_format(destination_desc.Format));
+            if (FAILED(result)) return result;
+        }
         if(guide.producer_fence && guide.producer_fence_value) {
             const HRESULT waited=impl_->queue->Wait(guide.producer_fence.Get(),guide.producer_fence_value);
             if(FAILED(waited)) return waited;
@@ -2127,6 +2162,16 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             };
             capture_prior_eye(source_eye, "afw_prior_source_eye_color");
             capture_prior_eye(1U - source_eye, "afw_prior_peer_eye_color");
+        }
+        if (normalize_color) {
+            // Preserve each eye's full FOV on a stable common raster; integer
+            // cropping would discard a different border on alternating eyes.
+            impl_->osr_source_scale.record(impl_->device.Get(), command_list,
+                source_color, D3D12_RESOURCE_STATE_COMMON,
+                static_cast<UINT>(source_desc.Width), source_desc.Height,
+                impl_->osr_source_scale.expanded(), D3D12_RESOURCE_STATE_COMMON,
+                static_cast<UINT>(color_desc.Width), color_desc.Height, 0);
+            source_color = impl_->osr_source_scale.expanded();
         }
         TextureDesc color_source{};
         color_source.texture = source_color;
@@ -2829,6 +2874,18 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             guide.publication);
         impl_->gpu_timing.mark(command_list,2);
         if (SUCCEEDED(result)) {
+            if (normalize_color) {
+                auto& scale = impl_->osr_destination_scale[1U - source_eye];
+                scale.record(impl_->device.Get(), command_list,
+                    final_color.texture, final_color.initial_state,
+                    static_cast<UINT>(color_desc.Width), color_desc.Height,
+                    scale.expanded(), D3D12_RESOURCE_STATE_COMMON,
+                    static_cast<UINT>(destination_desc.Width), destination_desc.Height, 0);
+                final_color.texture = scale.expanded();
+                final_color.initial_state = D3D12_RESOURCE_STATE_COMMON;
+                color_box.right = static_cast<UINT>(destination_desc.Width);
+                color_box.bottom = destination_desc.Height;
+            }
             TextureDesc destination{};
             destination.texture = destination_color;
             destination.initial_state = D3D12_RESOURCE_STATE_COMMON;
@@ -2842,8 +2899,8 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
                 output.stream = guide.stream;
                 output.capture_serial = guide.publication;
                 output.eye = static_cast<std::int32_t>(1U - source_eye);
-                output.width = static_cast<std::uint32_t>(color_desc.Width);
-                output.height = color_desc.Height;
+                output.width = static_cast<std::uint32_t>(destination_desc.Width);
+                output.height = destination_desc.Height;
                 two_frame_capture_record_ng_x(output, impl_->device.Get(),
                     command_list, destination_color,
                     D3D12_RESOURCE_STATE_COMMON);

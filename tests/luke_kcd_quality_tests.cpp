@@ -229,6 +229,58 @@ FARPROC WINAPI quality_get_proc_address(HMODULE module,LPCSTR name) {
 int main(int argc,char** argv) {try {
     if(argc==4 && std::filesystem::is_directory(argv[2]))return replay::run(argv[1],argv[2],argv[3]);
     using namespace quality;
+    if(argc==2 && std::string_view(argv[1])=="--osr-extents-only") {
+        D3D12_RESOURCE_DESC left{};
+        left.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        left.Width=3369;left.Height=3368;
+        left.DepthOrArraySize=left.MipLevels=left.SampleDesc.Count=1;
+        left.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        auto right=left;right.Width=3367;right.Height=3367;
+        for(const auto& pair:{std::pair{left,right},std::pair{right,left}}) {
+            const auto common=xrfg::osr_color_description(pair.first,pair.second,true);
+            require(common&&common->Width==3367&&common->Height==3367,
+                "Ghost unequal eyes did not use a stable common raster");
+            require(!xrfg::osr_color_description(pair.first,pair.second,false),
+                "legacy AFW accepted unequal eyes");
+        }
+        require(xrfg::osr_color_description(left,left,true).has_value(),
+            "equal eye input rejected");
+        right.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
+        require(!xrfg::osr_color_description(left,right,true),"different formats accepted");
+        right=left;right.DepthOrArraySize=2;
+        require(!xrfg::osr_color_description(left,right,true),"array input accepted");
+        right=left;right.SampleDesc.Count=2;
+        require(!xrfg::osr_color_description(left,right,true),"multisample input accepted");
+        right=left;right.Width=0;
+        require(!xrfg::osr_color_description(left,right,true),"zero extent accepted");
+        right=left;right.Width=UINT64(INT_MAX)+1;
+        require(!xrfg::osr_color_description(left,right,true),"oversized extent accepted");
+        ComPtr<ID3D12Debug> debug;
+        check(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)),"D3D12 debug layer");
+        debug->EnableDebugLayer();
+        ComPtr<IDXGIFactory4> factory;
+        check(CreateDXGIFactory2(0,IID_PPV_ARGS(&factory)),"WARP factory");
+        ComPtr<IDXGIAdapter> adapter;
+        check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)),"WARP adapter");
+        ComPtr<ID3D12Device> device;
+        check(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,
+            IID_PPV_ARGS(&device)),"WARP device");
+        ComPtr<ID3D12CommandQueue> queue;D3D12_COMMAND_QUEUE_DESC q{};
+        check(device->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)),"WARP queue");
+        color_scale_checks(device.Get(),queue.Get());
+        ComPtr<ID3D12InfoQueue> messages;
+        check(device.As(&messages),"D3D12 info queue");
+        for(UINT64 i=0;i<messages->GetNumStoredMessages();++i) {
+            SIZE_T size{};check(messages->GetMessage(i,nullptr,&size),"debug message size");
+            std::vector<unsigned char> storage(size);
+            auto* message=reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+            check(messages->GetMessage(i,message,&size),"debug message");
+            require(message->Severity!=D3D12_MESSAGE_SEVERITY_ERROR&&
+                message->Severity!=D3D12_MESSAGE_SEVERITY_CORRUPTION,message->pDescription);
+        }
+        std::cout<<"Ghost 3369x3368 / 3367x3367 common raster and WARP color resampling PASS\n";
+        return 0;
+    }
     require(argc>=2 && argc<=4,"provider path argument missing");
     native_peer_camera=GetEnvironmentVariableW(L"XRFG_TEST_GTA_HEADLOCK",nullptr,0)!=0;
     current_scene_test=GetEnvironmentVariableW(L"XRFG_TEST_GTA_CURRENT_SCENE",nullptr,0)!=0;

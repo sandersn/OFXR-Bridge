@@ -22,8 +22,9 @@ void color_scale_checks(ID3D12Device* device,ID3D12CommandQueue* queue) {
     for(UINT y=0;y<h;++y)std::memcpy(static_cast<char*>(data)+fp.Offset+y*fp.Footprint.RowPitch,original.data()+y*w*4,w*4);upload->Unmap(0,nullptr);
     auto b=transition(source.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);list->ResourceBarrier(1,&b);
     D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=upload.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;from.PlacedFootprint=fp;to.pResource=source.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;list->CopyTextureRegion(&to,0,0,0,&from,nullptr);std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(1,&b);submit();
-    for(UINT factor:{2u,4u}) {
-        const UINT lw=(w+factor-1)/factor,lh=(h+factor-1)/factor;
+    for(UINT factor:{1u,2u,4u}) {
+        const UINT lw=factor==1 ? w-2 : (w+factor-1)/factor;
+        const UINT lh=factor==1 ? h-1 : (h+factor-1)/factor;
         rd.Width=lw;rd.Height=lh;rd.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         ComPtr<ID3D12Resource> reduced_texture;check(device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&reduced_texture)),"scale reduced_texture");
         xrfg::AfwColorScale scale;check(scale.prepare(device,w,h,rd.Format),"scale pipeline");check(allocator->Reset(),"scale reset");check(list->Reset(allocator.Get(),nullptr),"scale reset list");
@@ -48,6 +49,12 @@ void color_scale_checks(ID3D12Device* device,ID3D12CommandQueue* queue) {
         }
         read->Unmap(0,nullptr);require(max_error<=1.6,"colour scale phase/edge/area oracle mismatch");
         std::cout<<"Colour area/bilinear factor="<<factor<<" odd37x29 all RGBA/edge pixels max_error="<<max_error<<" PASS\n";
+        const auto* previous=scale.expanded();
+        check(scale.prepare(device,w,h,rd.Format),"scale unchanged prepare");
+        require(scale.expanded()==previous,"unchanged scale allocation replaced");
+        check(scale.prepare(device,w+2,h+1,rd.Format),"scale resize prepare");
+        const auto resized=scale.expanded()->GetDesc();
+        require(resized.Width==w+2&&resized.Height==h+1,"scale resize retained stale extent");
     }
     CloseHandle(event);
 }

@@ -1,5 +1,24 @@
 Current shared routing: read [shared Autonomous handoff](../../docs/ofxr-autonomous/README.md). Build with `tools/Build-Autonomous.ps1` from the shared repository root; prepared dependencies are in `.local/ofxr-autonomous-deps` and outputs in `builds/ofxr-autonomous-new`. Earlier laboratory build paths below are historical.
 
+## Fork Windows test candidates
+
+This fork's [Windows test candidate workflow](../.github/workflows/windows-candidate.yml)
+builds on `windows-2022`; no local Windows developer tools are needed. A push to
+`fix/ghost-eye-extents` starts it automatically. Once the workflow is on the default
+branch, it can also be started from Actions with **Run workflow**.
+
+The workflow prepares the pinned FidelityFX and DLSS SDKs, public OpenVR and
+Streamline headers, and the unchanged FSR/legacy AFW providers from the official
+v0.3.2 archive. It builds the Release tray/layer and runs the unequal-eye regression
+and optical-flow unit tests. The raster regression uses the D3D12 WARP software
+adapter, not NVIDIA optical-flow hardware.
+
+A successful run uploads an **OFXR-Ghost-unequal-eyes** artifact containing an
+unsigned test package, source commit and SHA-256 checksums. Extract it separately
+and retain the official version for rollback. These binaries are not signed by the
+upstream author and are not suitable for anti-cheat-protected games. Passing CI
+does not establish visual correctness or performance in a headset.
+
 ## V483 candidate: Luke stereo continuity
 
 Horizon stationary flicker: repeated-eye source gaps collapse AFW stereo; real provider regression reproduced and corrected with current-source stereo warp for that transition. Ghost/Crimson native motion supports signed perspective W; actual game recovery pending. Focused30/30 pass. See docs/V483_LUKE_STEREO.md (V483_LUKE_STEREO.md within docs). FSR/OFA/providers/shaders/pacing retained; V474 fallback.

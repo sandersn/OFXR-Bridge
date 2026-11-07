@@ -1852,6 +1852,8 @@ add_executable(xrfg_luke_kcd_quality_tests tests/luke_kcd_quality_tests.cpp)
   target_compile_features(xrfg_luke_kcd_quality_tests PRIVATE cxx_std_20)
   target_compile_definitions(xrfg_luke_kcd_quality_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(xrfg_luke_kcd_quality_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
+  add_test(NAME xrfg_luke_osr_unequal_extents
+      COMMAND xrfg_luke_kcd_quality_tests --osr-extents-only)
   add_test(NAME xrfg_luke_kcd_quality_bundled COMMAND "${CMAKE_COMMAND}"
       "-DTEST_EXE=$<TARGET_FILE:xrfg_luke_kcd_quality_tests>" "-DPROVIDER=${XRFG_AFW_RUNTIME}"
       "-DDESTINATION=${CMAKE_CURRENT_BINARY_DIR}/kcd-quality-bundled"

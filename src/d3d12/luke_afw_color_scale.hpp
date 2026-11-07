@@ -14,7 +14,12 @@ class AfwColorScale {
 public:
     ID3D12Resource* expanded() const noexcept {return expanded_.Get();}
     HRESULT prepare(ID3D12Device* device, UINT width, UINT height, DXGI_FORMAT format) {
-        if(expanded_)return S_OK;
+        if(expanded_) {
+            const auto description = expanded_->GetDesc();
+            if(description.Width == width && description.Height == height && format_ == format)
+                return S_OK;
+            *this = AfwColorScale{};
+        }
         D3D12_DESCRIPTOR_RANGE ranges[2]{};
         ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,0,0,0};
         ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,0,0,1};

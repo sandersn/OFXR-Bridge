@@ -145,6 +145,10 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue)
         guide.scale_x=guide.scale_y=1;
         guide.calibrated_game_eye_baseline=static_cast<float>(baseline);
         guide.depth=depth;guide.motion_vectors=motion;
+        guide.motion_retention=std::make_shared<xrfg::DlssSnapshotRetention>();
+        guide.depth_retention=std::make_shared<xrfg::DlssSnapshotRetention>();
+        guide.producer_queue=queue;
+        guide.verified_producer_device=guide.motion_snapshot_device=guide.depth_snapshot_device=device;
         if(n>=2)guide.previous_opposite_guide=frames[n-2];
         if(n>=3)guide.previous_same_guide=frames[n-3];
         frames.push_back(frame);

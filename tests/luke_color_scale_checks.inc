@@ -126,10 +126,12 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue)
     wait(1);
     xrfg::LukeAfwSynthesizer synth;
     check(synth.initialize(device,queue,{}),"native OSR initialize");
-    for(unsigned n=1;n<=6;++n) {
+    std::vector<std::shared_ptr<DlssMotionVectorFrame>> frames;
+    for(unsigned n=1;n<=8;++n) {
         const unsigned eye=(n-1)%2;
         const auto current=camera(n,scenes[0]);
-        DlssMotionVectorFrame guide{};
+        auto frame=std::make_shared<DlssMotionVectorFrame>();
+        auto& guide=*frame;
         guide.stream=guide.epoch=1;guide.serial=guide.publication=n;
         guide.camera_data_valid=guide.camera_matrices_valid=true;
         guide.camera_position=current.packet.position;guide.camera_right=current.packet.right;
@@ -143,6 +145,10 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue)
         guide.scale_x=guide.scale_y=1;
         guide.calibrated_game_eye_baseline=static_cast<float>(baseline);
         guide.depth=depth;guide.motion_vectors=motion;
+        if(n>=2)guide.previous_opposite_guide=frames[n-2];
+        if(n>=3)guide.previous_same_guide=frames[n-3];
+        frames.push_back(frame);
+        if(n<3)continue;
         xrfg::D3D12ReprojectionView source{},destination{};
         source.pose.orientation.w=destination.pose.orientation.w=1;
         source.pose.position.x=eye?float(baseline*.5):float(-baseline*.5);

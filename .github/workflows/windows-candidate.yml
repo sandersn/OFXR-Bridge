@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Cache prepared vendor dependencies
         id: dependencies
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .local/ofxr-autonomous-deps
           key: windows-2022-ofxr-v773-deps-v1-${{ hashFiles('ffx_private_build.cmake', 'ffx_private_symbols.h') }}
@@ -62,6 +62,12 @@ jobs:
             "-DCMAKE_PROJECT_INCLUDE=$env:GITHUB_WORKSPACE/ffx_private_build.cmake")
           Invoke-Native cmake @('--build', "$deps/FidelityFX-build", '--config', 'Release',
             '--target', 'ffx_opticalflow_x64', 'ffx_backend_dx12_x64', '--parallel', '2')
+      - name: Save prepared dependencies
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .local/ofxr-autonomous-deps
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
       - name: Configure and build candidate
         shell: pwsh
         run: |

@@ -108,6 +108,18 @@ jobs:
             "$( (Get-FileHash $_.FullName -Algorithm SHA256).Hash )  $($_.FullName.Substring((Resolve-Path candidate).Path.Length + 1))"
           })
           $checksums | Set-Content candidate/SHA256SUMS.txt
+      - name: Diagnose native OSR test failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $debugger = 'C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe'
+          if ((Test-Path $debugger) -and (Test-Path build/Release/xrfg_luke_kcd_quality_tests.exe)) {
+            Set-Location build
+            & $debugger -c '.symfix; .reload; sxe av; g; .ecxr; kv; q' Release/xrfg_luke_kcd_quality_tests.exe --osr-extents-only
+            if ($LASTEXITCODE) { Write-Host "Debugger exit code: $LASTEXITCODE" }
+          } else {
+            Write-Host 'Windows SDK debugger or regression executable unavailable; see flight diagnostics.'
+          }
       - name: Upload candidate
         uses: actions/upload-artifact@v4
         with:

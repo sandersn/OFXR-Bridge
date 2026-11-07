@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .local/ofxr-autonomous-deps
-          key: windows-2022-ofxr-v773-deps-${{ hashFiles('ffx_private_build.cmake', 'ffx_private_symbols.h', '.github/workflows/windows-candidate.yml') }}
+          key: windows-2022-ofxr-v773-deps-v1-${{ hashFiles('ffx_private_build.cmake', 'ffx_private_symbols.h') }}
       - name: Prepare pinned dependencies
         if: steps.dependencies.outputs.cache-hit != 'true'
         shell: pwsh
@@ -97,9 +97,11 @@ jobs:
           WARP regression tests passed; actual game/headset validation is still required.
           Extract separately and keep the official installation as a rollback.
           "@ | Set-Content candidate/CANDIDATE.txt
-          Get-ChildItem candidate -Recurse -File | ForEach-Object {
+          $checksums = @(Get-ChildItem candidate -Recurse -File |
+            Where-Object Name -ne 'SHA256SUMS.txt' | ForEach-Object {
             "$( (Get-FileHash $_.FullName -Algorithm SHA256).Hash )  $($_.FullName.Substring((Resolve-Path candidate).Path.Length + 1))"
-          } | Set-Content candidate/SHA256SUMS.txt
+          })
+          $checksums | Set-Content candidate/SHA256SUMS.txt
       - name: Upload candidate
         uses: actions/upload-artifact@v4
         with:

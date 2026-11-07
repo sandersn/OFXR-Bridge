@@ -58,4 +58,103 @@ void color_scale_checks(ID3D12Device* device,ID3D12CommandQueue* queue) {
     }
     CloseHandle(event);
 }
+
+void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue) {
+    constexpr UINT guide_size=64;
+    const auto texture=[&](UINT width,UINT height,DXGI_FORMAT format) {
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC description{};
+        description.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        description.Width=width;description.Height=height;
+        description.DepthOrArraySize=description.MipLevels=description.SampleDesc.Count=1;
+        description.Format=format;
+        ComPtr<ID3D12Resource> resource;
+        check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&description,
+            D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&resource)),"OSR extent texture");
+        return resource;
+    };
+    std::array colors{texture(65,64,DXGI_FORMAT_R8G8B8A8_UNORM),
+        texture(63,63,DXGI_FORMAT_R8G8B8A8_UNORM)};
+    auto depth=texture(guide_size,guide_size,DXGI_FORMAT_R32_FLOAT);
+    auto motion=texture(guide_size,guide_size,DXGI_FORMAT_R32G32_FLOAT);
+    ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;
+    check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+        IID_PPV_ARGS(&allocator)),"OSR upload allocator");
+    check(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),
+        nullptr,IID_PPV_ARGS(&list)),"OSR upload list");
+    std::vector<ComPtr<ID3D12Resource>> uploads;
+    const std::array targets{colors[0].Get(),colors[1].Get(),depth.Get(),motion.Get()};
+    for(UINT i=0;i<targets.size();++i) {
+        const auto description=targets[i]->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT64 bytes{};
+        device->GetCopyableFootprints(&description,0,1,0,&footprint,nullptr,nullptr,&bytes);
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=bytes;
+        buffer.Height=buffer.DepthOrArraySize=buffer.MipLevels=buffer.SampleDesc.Count=1;
+        buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> upload;
+        check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,
+            D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&upload)),"OSR upload buffer");
+        void* data{};check(upload->Map(0,nullptr,&data),"OSR upload map");
+        std::memset(data,0,static_cast<SIZE_T>(bytes));
+        for(UINT y=0;y<description.Height;++y)for(UINT x=0;x<description.Width;++x) {
+            auto* pixel=static_cast<unsigned char*>(data)+footprint.Offset+
+                y*footprint.Footprint.RowPitch+x*(i==3?8:4);
+            if(i<2) {const unsigned char rgba[]{80,120,160,255};std::memcpy(pixel,rgba,4);}
+            else if(i==2) {const float value=.1F/3.F;std::memcpy(pixel,&value,4);}
+        }
+        upload->Unmap(0,nullptr);
+        auto barrier=transition(targets[i],D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
+        list->ResourceBarrier(1,&barrier);
+        D3D12_TEXTURE_COPY_LOCATION source{},destination{};
+        source.pResource=upload.Get();source.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        source.PlacedFootprint=footprint;
+        destination.pResource=targets[i];destination.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        list->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
+        std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
+        list->ResourceBarrier(1,&barrier);uploads.push_back(upload);
+    }
+    check(list->Close(),"OSR upload close");
+    ID3D12CommandList* lists[]{list.Get()};queue->ExecuteCommandLists(1,lists);
+    ComPtr<ID3D12Fence> fence;
+    check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"OSR fence");
+    const auto wait=[&](UINT64 value) {
+        check(queue->Signal(fence.Get(),value),"OSR signal");
+        check(fence->SetEventOnCompletion(value,nullptr),"OSR wait");
+    };
+    wait(1);
+    xrfg::LukeAfwSynthesizer synth;
+    check(synth.initialize(device,queue,{}),"native OSR initialize");
+    for(unsigned n=1;n<=6;++n) {
+        const unsigned eye=(n-1)%2;
+        const auto current=camera(n,scenes[0]);
+        DlssMotionVectorFrame guide{};
+        guide.stream=guide.epoch=1;guide.serial=guide.publication=n;
+        guide.camera_data_valid=guide.camera_matrices_valid=true;
+        guide.camera_position=current.packet.position;guide.camera_right=current.packet.right;
+        guide.camera_up=current.packet.up;guide.camera_forward=current.packet.forward;
+        guide.camera_view_to_clip=current.packet.projection;
+        guide.camera_clip_to_view=current.packet.inverse_projection;
+        guide.camera_near=current.packet.near_plane;guide.camera_far=current.packet.far_plane;
+        guide.depth_inverted=guide.depth_infinite=true;
+        guide.output_width=guide.output_height=guide_size;
+        guide.depth_width=guide.depth_height=guide.motion_width=guide.motion_height=guide_size;
+        guide.scale_x=guide.scale_y=1;
+        guide.calibrated_game_eye_baseline=static_cast<float>(baseline);
+        guide.depth=depth;guide.motion_vectors=motion;
+        xrfg::D3D12ReprojectionView source{},destination{};
+        source.pose.orientation.w=destination.pose.orientation.w=1;
+        source.pose.position.x=eye?float(baseline*.5):float(-baseline*.5);
+        destination.pose.position.x=-source.pose.position.x;
+        const float angle=std::atan(63.F/64.F);
+        source.fov=destination.fov={-angle,angle,angle,-angle};
+        xrfg::embedded::AfwSettings settings{};settings.mode=3;
+        settings.osr=static_cast<int>(xrfg::OsrReconstruction::full);
+        check(synth.synthesize(colors[eye].Get(),colors[1-eye].Get(),guide,source,
+            destination,eye,static_cast<float>(baseline),settings),"unequal-eye native OSR submission");
+        wait(n+1);
+    }
+    std::cout<<"Six alternating unequal-eye native OSR submissions PASS\n";
+}
 }

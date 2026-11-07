@@ -230,6 +230,14 @@ int main(int argc,char** argv) {try {
     if(argc==4 && std::filesystem::is_directory(argv[2]))return replay::run(argv[1],argv[2],argv[3]);
     using namespace quality;
     if(argc==2 && std::string_view(argv[1])=="--osr-extents-only") {
+        std::cout << std::unitbuf;
+        const auto log_root=std::filesystem::current_path()/"Testing/Temporary/osr-extents";
+        std::filesystem::create_directories(log_root);
+        {
+            std::ofstream ini(log_root/"ofxr_bridge.ini");
+            ini<<"[diagnostics]\nlogging_enabled=1\nflush_each_event=1\nmax_file_mb=16\n";
+        }
+        xrfg::bridge_flight_logger().initialize(log_root);
         D3D12_RESOURCE_DESC left{};
         left.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         left.Width=3369;left.Height=3368;

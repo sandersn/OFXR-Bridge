@@ -157,6 +157,7 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue)
         source.fov=destination.fov={-angle,angle,angle,-angle};
         xrfg::embedded::AfwSettings settings{};settings.mode=3;
         settings.osr=static_cast<int>(xrfg::OsrReconstruction::full);
+        std::cerr<<"Native OSR extent submission publication="<<n<<" eye="<<eye<<'\n';
         check(synth.synthesize(colors[eye].Get(),colors[1-eye].Get(),guide,source,
             destination,eye,static_cast<float>(baseline),settings),"unequal-eye native OSR submission");
         wait(n+1);

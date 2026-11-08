@@ -67,7 +67,12 @@ cbuffer Osr : register(b0) {
     // + 1.4 px, so without this every silhouette moved with the jitter.
     float2 SourceDejitter;  // for SourceDepth
     float2 HistoryDejitter; // for HistoryDepth
+    uint PackedHistorySize; // high/low 16 bits: the retained eye's native grid
 };
+
+uint2 history_size() {
+    return uint2(PackedHistorySize >> 16, PackedHistorySize & 65535u);
+}
 
 static const uint TagStereo = 1u;
 static const uint TagHistory = 2u;
@@ -129,7 +134,7 @@ void classify_scene(uint lane) {
             const float3 h = q.xyz / q.w;
             const float2 huv = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);
             if (any(huv < 0.0) || any(huv >= 1.0)) continue;
-            const int2 ht = clamp(int2(floor(huv * DepthSize - HistoryDejitter)), 0, int2(DepthSize) - 1);
+            const int2 ht = clamp(int2(floor(huv * history_size() - HistoryDejitter)), 0, int2(history_size()) - 1);
             const float hz = HistoryDepth.Load(int3(ht, 0));
             const float3 a = max(SourceColor.SampleLevel(LinearClamp, uv, 0).rgb, 0);
             const float3 b = max(HistoryColor.SampleLevel(LinearClamp, huv, 0).rgb, 0);
@@ -222,10 +227,10 @@ float2 history_texel_now(int2 t, float z, out bool locked) {
     locked = z >= LockedDepth;
     if (!locked && SceneState[uint2(4, 0)] != 0 && (MotionScale.x != 0.0 || MotionScale.y != 0.0)) {
         float2 total = HistoryMotion.Load(int3(t, 0)) * MotionScale;
-        float2 ndc = float2(pos.x / DepthSize.x * 2.0 - 1.0, 1.0 - pos.y / DepthSize.y * 2.0);
+        float2 ndc = float2(pos.x / history_size().x * 2.0 - 1.0, 1.0 - pos.y / history_size().y * 2.0);
         float4 q = mul(float4(ndc, z, 1.0), BackwardHistory);
         if (all(isfinite(total)) && all(abs(total) <= 4096.0) && all(isfinite(q)) && q.w > 1e-8) {
-            float2 before = float2((q.x / q.w + 1.0) * 0.5 * DepthSize.x, (1.0 - q.y / q.w) * 0.5 * DepthSize.y);
+            float2 before = float2((q.x / q.w + 1.0) * 0.5 * history_size().x, (1.0 - q.y / q.w) * 0.5 * history_size().y);
             float2 camera = before - pos;
             float2 object = total - camera;
             const float camera_length = length(camera);
@@ -248,14 +253,14 @@ bool history_landing(uint2 id, out float2 p, out uint word, out float2 origin) {
         z = max(z, FarDepth);
         bool locked;
         float2 now = history_texel_now(int2(id), z, locked);
-        float2 ndc = float2(now.x / DepthSize.x * 2.0 - 1.0, 1.0 - now.y / DepthSize.y * 2.0);
+        float2 ndc = float2(now.x / history_size().x * 2.0 - 1.0, 1.0 - now.y / history_size().y * 2.0);
         float4 q = mul(float4(ndc, z, 1.0), Forward);
         if (locked) {
             // Same eye, attached to the camera: the history image position is
             // the destination position, at the same depth. The lowest bit of
             // the depth word marks it for the resolve (far below depth
             // precision; non-attached words keep it clear).
-            p = now - 0.5;
+            p = now * float2(DepthSize) / float2(history_size()) - 0.5;
             word = asuint(z) | HistoryLockedBit;
             ok = all(isfinite(p));
         } else if (all(isfinite(q)) && q.w > 1e-8) {
@@ -274,7 +279,7 @@ bool history_landing(uint2 id, out float2 p, out uint word, out float2 origin) {
 [numthreads(8, 8, 1)]
 void OsrFullSplatHistory(uint3 id : SV_DispatchThreadID) {
     if (SceneState[uint2(0, 0)] == 0) return;
-    if (any(id.xy >= DepthSize)) return;
+    if (any(id.xy >= history_size())) return;
     float2 p, origin; uint word;
     if (!history_landing(id.xy, p, word, origin)) return;
     int2 base = int2(floor(p));
@@ -289,7 +294,7 @@ void OsrFullSplatHistory(uint3 id : SV_DispatchThreadID) {
 [numthreads(8, 8, 1)]
 void OsrFullSplatOffset(uint3 id : SV_DispatchThreadID) {
     if (SceneState[uint2(0, 0)] == 0) return;
-    if (any(id.xy >= DepthSize)) return;
+    if (any(id.xy >= history_size())) return;
     float2 p, origin; uint word;
     if (!history_landing(id.xy, p, word, origin)) return;
     int2 base = int2(floor(p));
@@ -297,7 +302,7 @@ void OsrFullSplatOffset(uint3 id : SV_DispatchThreadID) {
         [unroll] for (int dx = 0; dx < 2; ++dx) {
             int2 t = base + int2(dx, dy);
             if (all(t >= 0) && all(t < int2(DepthSize)) && SplatOut[t] == word)
-                OffsetOut[t] = pack_position(origin + (float2(t) - p)); // footprint texel's own sub-texel place
+                OffsetOut[t] = pack_position(origin + (float2(t) - p) * float2(history_size()) / float2(DepthSize));
         }
 }
 
@@ -383,12 +388,14 @@ float4 sample_nearest(Texture2D<float4> tex, float2 uv) {
 // expected reversed depth? The 2x2 texels under the bilinear footprint are
 // tried so a depth gradient inside one texel does not reject its own surface.
 bool surface_agrees(Texture2D<float> image, float2 p, float expected, float2 dejitter) {
+    uint width, height;
+    image.GetDimensions(width, height);
     p -= dejitter; // scene position -> depth grid position
     int2 base = int2(floor(p - 0.5));
     bool agrees = false; // single exit: fxc's flow analysis rejects returns inside unrolled loops
     [unroll] for (int dy = 0; dy < 2; ++dy)
         [unroll] for (int dx = 0; dx < 2; ++dx) {
-            int2 t = clamp(base + int2(dx, dy), int2(0, 0), int2(DepthSize) - 1);
+            int2 t = clamp(base + int2(dx, dy), int2(0, 0), int2(width, height) - 1);
             float z = image.Load(int3(t, 0));
             // Two depths at sky level are the same surface. The splat clamps the
             // sky's 0 to FarDepth, and a finite far plane (Spider-Man) spreads
@@ -411,16 +418,19 @@ static float g_fetch_depth = 0;
 // its colour when that image agrees it holds the surface.
 bool fetch(Texture2D<float> depth, Texture2D<float4> color, float4x4 backward,
     float2 ndc, float z, float2 dejitter, bool nearest_pixel, out float4 result) {
+    uint width, height;
+    depth.GetDimensions(width, height);
+    const float2 image_size = float2(width, height);
     result = 0;
     bool found = false;
     float4 q = mul(float4(ndc, z, 1.0), backward);
     if (all(isfinite(q)) && q.w > 1e-8) {
-        float2 p = float2((q.x / q.w + 1.0) * 0.5 * DepthSize.x,
-                          (1.0 - q.y / q.w) * 0.5 * DepthSize.y); // continuous texel position, centres at .5
+        float2 p = float2((q.x / q.w + 1.0) * 0.5 * image_size.x,
+                          (1.0 - q.y / q.w) * 0.5 * image_size.y);
         float expected = max(q.z / q.w, 0.0); // at or beyond a finite far plane is far
-        if (all(isfinite(p)) && all(p >= 0.0) && all(p < float2(DepthSize)) &&
+        if (all(isfinite(p)) && all(p >= 0.0) && all(p < image_size) &&
             surface_agrees(depth, p, expected, dejitter)) {
-            result = nearest_pixel ? sample_nearest(color, p / float2(DepthSize)) : sample_sharp(color, p / float2(DepthSize));
+            result = nearest_pixel ? sample_nearest(color, p / image_size) : sample_sharp(color, p / image_size);
             g_fetch_position = p; g_fetch_depth = expected;
             found = true;
         }
@@ -461,12 +471,14 @@ bool resolve_image(Texture2D<uint> splat, Texture2D<float> depth, Texture2D<floa
 // nearer than at_depth by EdgeRatio within HaloRadius (its depth in near) and
 // the mean offset toward such texels, i.e. the direction across the edge.
 float2 halo_direction(Texture2D<float> image, int2 t, float at_depth, out float near) {
+    uint width, height;
+    image.GetDimensions(width, height);
     near = 0.0;
     float2 sum = 0;
     float count = 0;
     [unroll] for (int dy = -HaloRadius; dy <= HaloRadius; ++dy)
         [unroll] for (int dx = -HaloRadius; dx <= HaloRadius; ++dx) {
-            const float z = image.Load(int3(clamp(t + int2(dx, dy), int2(0, 0), int2(DepthSize) - 1), 0));
+            const float z = image.Load(int3(clamp(t + int2(dx, dy), int2(0, 0), int2(width, height) - 1), 0));
             near = max(near, z);
             if (z > at_depth * EdgeRatio + FarDepth) { sum += float2(dx, dy); count += 1.0; }
         }
@@ -480,13 +492,13 @@ float2 halo_direction(Texture2D<float> image, int2 t, float at_depth, out float 
 // top of a roof while strafing) keeps the halo on it: measuring the whole
 // parallax dropped those halos and the row-wise inpaint drew a dashed line
 // along every top edge (Spider-Man F8s of 2026-11-01 14:2x).
-float halo_parallax(float4x4 backward, float2 ndc, float at_depth, float near, float2 toward) {
+float halo_parallax(float4x4 backward, float2 ndc, float at_depth, float near, float2 toward, uint2 image_size) {
     const float4 qb = mul(float4(ndc, at_depth, 1.0), backward);
     const float4 qn = mul(float4(ndc, near, 1.0), backward);
     float parallax = 1e9;
     if (qb.w > 1e-8 && qn.w > 1e-8) {
-        const float2 pb = float2(qb.x / qb.w, -qb.y / qb.w) * 0.5 * float2(DepthSize);
-        const float2 pn = float2(qn.x / qn.w, -qn.y / qn.w) * 0.5 * float2(DepthSize);
+        const float2 pb = float2(qb.x / qb.w, -qb.y / qb.w) * 0.5 * float2(image_size);
+        const float2 pn = float2(qn.x / qn.w, -qn.y / qn.w) * 0.5 * float2(image_size);
         const float2 d = pn - pb;
         const float across = length(toward);
         parallax = across > 0.25 ? abs(dot(d, toward / across)) : length(d);
@@ -545,10 +557,11 @@ bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, o
     float at_depth = 0;
     uint packed = use_offsets ? HistoryOffset.Load(int3(c, 0)) : 0u;
     if (word != 0 && packed != 0) {
-        float2 at = unpack_position(packed) + (depth_pixel - (float2(c) + 0.5));
-        at = clamp(at, 0.0, float2(DepthSize) - 0.001);
+        float2 at = unpack_position(packed) +
+            (depth_pixel - (float2(c) + 0.5)) * float2(history_size()) / float2(DepthSize);
+        at = clamp(at, 0.0, float2(history_size()) - 0.001);
         if (surface_agrees(HistoryDepth, at, asfloat(word), HistoryDejitter)) {
-            result = sample_nearest(HistoryColor, at / float2(DepthSize));
+            result = sample_nearest(HistoryColor, at / float2(history_size()));
             at_scene = at; at_depth = asfloat(word);
             found = true;
         }
@@ -571,7 +584,7 @@ bool resolve_history(int2 c, float2 depth_pixel, float2 ndc, bool use_offsets, o
         // line alternating with the real frames' rim, a band around the
         // weapon (Cyberpunk, F8 of 2026-11-02 10:06:52).
         if (history_near > at_depth * EdgeRatio + FarDepth && history_near < LockedDepth &&
-            (halo_parallax(BackwardHistory, ndc, at_depth, history_near, toward) > HaloParallax ||
+            (halo_parallax(BackwardHistory, ndc, at_depth, history_near, toward, history_size()) > HaloParallax ||
              !nearer_surface_present(c, at_depth)))
             found = false;
     }
@@ -618,7 +631,7 @@ bool source_halo_stale(float2 at_scene, float at_depth, float2 ndc) {
     float near = 0.0;
     const float2 toward = halo_direction(SourceDepth, t, at_depth, near);
     return near > at_depth * EdgeRatio + FarDepth &&
-        halo_parallax(BackwardSource, ndc, at_depth, near, toward) > HaloParallax;
+        halo_parallax(BackwardSource, ndc, at_depth, near, toward, DepthSize) > HaloParallax;
 }
 
 // Does the previous frame hold a surface at depth z within one texel of
@@ -633,7 +646,7 @@ bool history_has_surface(float2 at_scene, float z) {
     bool found = false;
     [unroll] for (int dy = -1; dy <= 1; ++dy)
         [unroll] for (int dx = -1; dx <= 1; ++dx) {
-            const float zz = HistoryDepth.Load(int3(clamp(t + int2(dx, dy), int2(0, 0), int2(DepthSize) - 1), 0));
+            const float zz = HistoryDepth.Load(int3(clamp(t + int2(dx, dy), int2(0, 0), int2(history_size()) - 1), 0));
             found = found || (zz <= SkyDepth && z <= SkyDepth) ||
                 abs(zz - z) <= DepthTolerance * max(zz, z) + FarDepth;
         }
@@ -656,8 +669,8 @@ bool history_ray_unchanged(float2 ndc, float z) {
     const float4 qb = mul(float4(ndc, FarDepth, 1.0), BackwardHistory);
     bool unchanged = false;
     if (qa.w > 1e-8 && qb.w > 1e-8) {
-        const float2 pa = float2(qa.x / qa.w, -qa.y / qa.w) * 0.5 * float2(DepthSize);
-        const float2 pb = float2(qb.x / qb.w, -qb.y / qb.w) * 0.5 * float2(DepthSize);
+        const float2 pa = float2(qa.x / qa.w, -qa.y / qa.w) * 0.5 * float2(history_size());
+        const float2 pb = float2(qb.x / qb.w, -qb.y / qb.w) * 0.5 * float2(history_size());
         unchanged = length(pa - pb) <= HaloParallax;
     }
     return unchanged;

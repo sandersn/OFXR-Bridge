@@ -276,7 +276,8 @@ int main(int argc,char** argv) {try {
         ComPtr<ID3D12CommandQueue> queue;D3D12_COMMAND_QUEUE_DESC q{};
         check(device->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)),"WARP queue");
         color_scale_checks(device.Get(),queue.Get());
-        osr_extent_synthesis_checks(device.Get(),queue.Get());
+        osr_extent_synthesis_checks(device.Get(),queue.Get(),false);
+        osr_extent_synthesis_checks(device.Get(),queue.Get(),true);
         ComPtr<ID3D12InfoQueue> messages;
         check(device.As(&messages),"D3D12 info queue");
         for(UINT64 i=0;i<messages->GetNumStoredMessages();++i) {

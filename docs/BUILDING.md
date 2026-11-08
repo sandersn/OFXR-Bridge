@@ -12,6 +12,9 @@ Streamline headers, and the unchanged FSR/legacy AFW providers from the official
 v0.3.2 archive. It builds the Release tray/layer and runs the unequal-eye regression
 and optical-flow unit tests. The raster regression uses the D3D12 WARP software
 adapter, not NVIDIA optical-flow hardware.
+It alternates unequal native eye/depth extents with DLSS jitter, requires image
+and motion history after priming, checks GPU history-filled disocclusions, and
+verifies history invalidation when an eye or the common color geometry changes.
 
 A successful run uploads an **OFXR-Ghost-unequal-eyes** artifact containing an
 unsigned test package, source commit and SHA-256 checksums. Extract it separately

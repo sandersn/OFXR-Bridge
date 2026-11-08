@@ -2418,7 +2418,7 @@ HRESULT LukeAfwSynthesizer::synthesize(ID3D12Resource* source_color,
             const HRESULT ready = !impl_->quality_can_scale ? DXGI_ERROR_UNSUPPORTED
                 : impl_->osr_full.prepare(impl_->device.Get(),
                     static_cast<UINT>(depth_extent.Width), depth_extent.Height,
-                    static_cast<UINT>(color_desc.Width), color_desc.Height, quality_format);
+                    static_cast<UINT>(color_desc.Width), color_desc.Height, quality_format, source_eye);
             if (SUCCEEDED(ready)) full_osr = true;
             else {
                 const auto now = GetTickCount64();

@@ -29,8 +29,9 @@ struct OsrFullConstants {
     float motion_scale[2]{}; // composed motion value -> depth texels; zero = no motion compensation
     float source_dejitter[2]{};  // depth texel -> scene position, in texels (window fraction - jitter)
     float history_dejitter[2]{};
+    std::uint32_t history_size{};
 };
-static_assert(sizeof(OsrFullConstants) == 62 * sizeof(std::uint32_t));
+static_assert(sizeof(OsrFullConstants) == 63 * sizeof(std::uint32_t));
 
 // The camera of an eye's last real frame, in the provider's convention
 // (row vectors, reversed depth), kept with that frame's colour and depth.
@@ -62,7 +63,13 @@ class OsrFullWarp {
     Microsoft::WRL::ComPtr<ID3D12RootSignature> root_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> clear_, splat_, splat_history_, splat_offset_, resolve_, inpaint_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap_;
-    Tracked stereo_, history_splat_, history_offset_, warped_, resolved_, output_, scene_state_;
+    struct DepthGrid {
+        Tracked stereo, history_splat, history_offset;
+        UINT width{}, height{};
+    };
+    std::array<DepthGrid, 2> depth_grids_{};
+    unsigned depth_eye_{};
+    Tracked warped_, resolved_, output_, scene_state_;
     bool scene_initialized_{};
     std::array<Tracked, 2> history_color_{}, history_depth_{}, history_motion_{};
     std::array<OsrFullHistory, 2> history_{};
@@ -243,8 +250,8 @@ public:
     };
 
     ID3D12Resource* output() const noexcept { return output_.resource.Get(); }
-    ID3D12Resource* stereo_depth() const noexcept { return stereo_.resource.Get(); }
-    D3D12_RESOURCE_STATES stereo_depth_state() const noexcept { return stereo_.state; }
+    ID3D12Resource* stereo_depth() const noexcept { return depth_grids_[depth_eye_].stereo.resource.Get(); }
+    D3D12_RESOURCE_STATES stereo_depth_state() const noexcept { return depth_grids_[depth_eye_].stereo.state; }
     ID3D12Resource* resolved() const noexcept { return resolved_.resource.Get(); }
     ID3D12Resource* scene_state() const noexcept { return scene_state_.resource.Get(); }
     D3D12_RESOURCE_STATES scene_state_state() const noexcept { return scene_state_.state; }
@@ -252,35 +259,54 @@ public:
     const OsrFullHistory& history(unsigned eye) const noexcept { return history_[eye & 1]; }
 
     // color_format must support typed UAV stores (the caller checks, as for the
-    // provider's reduced-quality expansion). A geometry or format change drops
-    // the history: its frames no longer match the new images.
+    // provider's reduced-quality expansion). Each eye retains its native depth
+    // grid; alternating eye FOVs must not erase the other eye's history.
     HRESULT prepare(ID3D12Device* device, UINT depth_width, UINT depth_height,
-        UINT color_width, UINT color_height, DXGI_FORMAT color_format) {
+        UINT color_width, UINT color_height, DXGI_FORMAT color_format,
+        unsigned source_eye = 0) {
+        if (source_eye > 1 || !depth_width || !depth_height ||
+            depth_width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            depth_height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+            return E_INVALIDARG;
         HRESULT result = create_pipelines(device);
         if (FAILED(result)) return result;
-        if (output_.resource && depth_width == depth_width_ && depth_height == depth_height_ &&
-            color_width == color_width_ && color_height == color_height_ && color_format == format_)
-            return S_OK;
-        history_ = {};
-        scene_initialized_ = false;
-        pending_eye_ = 2;
-        // Typeless so the F8 capture, which knows R32_TYPELESS, can read them;
-        // the views are R32_UINT.
-        result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, stereo_);
-        if (SUCCEEDED(result)) result = create_texture(device, 5, 1, DXGI_FORMAT_R32_TYPELESS, true, scene_state_);
-        if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, history_splat_);
-        if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, history_offset_);
-        if (SUCCEEDED(result)) result = create_texture(device, color_width, color_height, color_format, true, warped_);
-        if (SUCCEEDED(result)) result = create_texture(device, color_width, color_height, DXGI_FORMAT_R32_TYPELESS, true, resolved_);
-        if (SUCCEEDED(result)) result = create_texture(device, color_width, color_height, color_format, true, output_);
-        for (unsigned eye = 0; eye < 2 && SUCCEEDED(result); ++eye) {
-            result = create_texture(device, color_width, color_height, color_format, false, history_color_[eye]);
-            if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_FLOAT, false, history_depth_[eye]);
-            if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, kMotionFormat, false, history_motion_[eye]);
+        if (!output_.resource || color_width != color_width_ ||
+            color_height != color_height_ || color_format != format_) {
+            history_ = {};
+            depth_grids_ = {};
+            scene_initialized_ = false;
+            pending_eye_ = 2;
+            result = create_texture(device, 5, 1, DXGI_FORMAT_R32_TYPELESS, true, scene_state_);
+            if (SUCCEEDED(result)) result = create_texture(device, color_width, color_height, color_format, true, warped_);
+            if (SUCCEEDED(result)) result = create_texture(device, color_width, color_height, DXGI_FORMAT_R32_TYPELESS, true, resolved_);
+            if (SUCCEEDED(result)) result = create_texture(device, color_width, color_height, color_format, true, output_);
+            for (unsigned eye = 0; eye < 2 && SUCCEEDED(result); ++eye) {
+                result = create_texture(device, color_width, color_height, color_format, false, history_color_[eye]);
+                if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_FLOAT, false, history_depth_[eye]);
+                if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, kMotionFormat, false, history_motion_[eye]);
+            }
+            if (FAILED(result)) { output_.resource.Reset(); return result; }
+            color_width_ = color_width; color_height_ = color_height; format_ = color_format;
         }
-        if (FAILED(result)) { output_.resource.Reset(); return result; }
+        auto& grid = depth_grids_[source_eye];
+        if (!grid.stereo.resource || grid.width != depth_width || grid.height != depth_height) {
+            grid.width = grid.height = 0;
+            result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, grid.stereo);
+            if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, grid.history_splat);
+            if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_TYPELESS, true, grid.history_offset);
+            if (FAILED(result)) return result;
+            grid.width = depth_width; grid.height = depth_height;
+        }
+        const auto previous = history_depth_[source_eye].resource->GetDesc();
+        if (previous.Width != depth_width || previous.Height != depth_height) {
+            history_[source_eye] = {};
+            scene_initialized_ = false;
+            result = create_texture(device, depth_width, depth_height, DXGI_FORMAT_R32_FLOAT, false, history_depth_[source_eye]);
+            if (SUCCEEDED(result)) result = create_texture(device, depth_width, depth_height, kMotionFormat, false, history_motion_[source_eye]);
+            if (FAILED(result)) { output_.resource.Reset(); return result; }
+        }
+        depth_eye_ = source_eye;
         depth_width_ = depth_width; depth_height_ = depth_height;
-        color_width_ = color_width; color_height_ = color_height; format_ = color_format;
         return S_OK;
     }
 
@@ -288,6 +314,10 @@ public:
     // depth and colour return to their incoming states.
     void record(ID3D12Device* device, ID3D12GraphicsCommandList* list, const Inputs& in) {
         const unsigned source_eye = in.source_eye & 1, destination_eye = 1 - source_eye;
+        auto& grid = depth_grids_[depth_eye_];
+        auto& stereo_ = grid.stereo;
+        auto& history_splat_ = grid.history_splat;
+        auto& history_offset_ = grid.history_offset;
         OsrFullConstants constants{};
         constants.depth_width = depth_width_; constants.depth_height = depth_height_;
         constants.color_width = color_width_; constants.color_height = color_height_;
@@ -304,6 +334,8 @@ public:
         Tracked& history_depth = history_depth_[destination_eye];
         Tracked& history_color = history_color_[destination_eye];
         Tracked& history_motion = history_motion_[destination_eye];
+        const auto history_extent = history_depth.resource->GetDesc();
+        constants.history_size = (static_cast<UINT>(history_extent.Width) << 16) | history_extent.Height;
         Barriers barriers;
         // 1. clear
         barriers.track(stereo_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -346,12 +378,12 @@ public:
             const std::array<ID3D12Resource*, kSrvCount> srvs{history_depth.resource.Get(), nullptr, nullptr, nullptr,
                 nullptr, nullptr, nullptr, nullptr, history_motion.resource.Get(), nullptr};
             dispatch(list, splat_history_.Get(), bind(device, block_splat_history, srvs, {history_splat_.resource.Get()}),
-                history_constants, depth_width_, depth_height_);
+                history_constants, static_cast<UINT>(history_extent.Width), history_extent.Height);
             barriers.uav(history_splat_.resource.Get());
             barriers.flush(list);
             dispatch(list, splat_offset_.Get(), bind(device, block_splat_offset, srvs,
                 {history_splat_.resource.Get(), nullptr, nullptr, nullptr, nullptr, history_offset_.resource.Get()}),
-                history_constants, depth_width_, depth_height_);
+                history_constants, static_cast<UINT>(history_extent.Width), history_extent.Height);
         }
         // 3. resolve
         barriers.track(stereo_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -444,7 +476,10 @@ public:
     // A recording that is closed but never executed leaves the GPU state as
     // the last executed recording ended it: COMMON, with the old history.
     void discard() noexcept {
-        for (Tracked* t : {&stereo_, &history_splat_, &history_offset_, &warped_, &resolved_, &output_, &scene_state_,
+        for (auto& grid : depth_grids_)
+            for (Tracked* t : {&grid.stereo, &grid.history_splat, &grid.history_offset})
+                t->state = D3D12_RESOURCE_STATE_COMMON;
+        for (Tracked* t : {&warped_, &resolved_, &output_, &scene_state_,
             &history_color_[0], &history_color_[1], &history_depth_[0], &history_depth_[1],
             &history_motion_[0], &history_motion_[1]})
             t->state = D3D12_RESOURCE_STATE_COMMON;

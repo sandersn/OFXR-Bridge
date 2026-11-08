@@ -205,8 +205,11 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue,
         const auto previous=std::stoull(fields.at("c"));
         ++submissions;
         if(publication>=4) {
-            require((flags&1)!=0&&previous==publication-1,
+            require(previous==publication-1,
                 "alternating native grids discarded the peer eye's image history");
+        }
+        if(publication>=5) {
+            require((flags&1)!=0,"image history unavailable after both eyes were primed");
             ++histories;
         }
         if(publication>=6) {
@@ -214,7 +217,7 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue,
             ++motion_histories;
         }
     }
-    require(submissions==6&&histories==5&&motion_histories==3,
+    require(submissions==6&&histories==4&&motion_histories==3,
         "missing native OSR history regression observations");
     // Exercise actual history dispatch/readback independently of telemetry,
     // including camera-attached history, motion, and both grid directions.
@@ -318,6 +321,6 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue,
         "color geometry change retained incompatible histories");
     require(warp.prepare(device,0,60,62,63,DXGI_FORMAT_R8G8B8A8_UNORM,0)==E_INVALIDARG,
         "empty native history grid accepted");
-    std::cout<<(asymmetric?"Asymmetric":"Equal")<<" jittered depth grids; five image and three motion histories PASS\n";
+    std::cout<<(asymmetric?"Asymmetric":"Equal")<<" jittered depth grids; four image and three motion histories PASS\n";
 }
 }

@@ -84,8 +84,8 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue,
         nullptr,IID_PPV_ARGS(&list)),"OSR upload list");
     std::vector<ComPtr<ID3D12Resource>> uploads;
     const std::array targets{colors[0].Get(),colors[1].Get(),depth.Get(),motion.Get()};
-    for(UINT i=0;i<targets.size();++i) {
-        const auto description=targets[i]->GetDesc();
+    const auto upload_texture=[&](ID3D12Resource* target,unsigned kind) {
+        const auto description=target->GetDesc();
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT64 bytes{};
         device->GetCopyableFootprints(&description,0,1,0,&footprint,nullptr,nullptr,&bytes);
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_UPLOAD;
@@ -101,20 +101,21 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue,
         for(UINT y=0;y<description.Height;++y)for(UINT x=0;x<description.Width;++x) {
             auto* pixel=static_cast<unsigned char*>(data)+footprint.Offset+
                 y*footprint.Footprint.RowPitch+x*4;
-            if(i<2) {const unsigned char rgba[]{80,120,160,255};std::memcpy(pixel,rgba,4);}
-            else if(i==2) {const float value=.1F/3.F;std::memcpy(pixel,&value,4);}
+            if(kind==0) {const unsigned char rgba[]{80,120,160,255};std::memcpy(pixel,rgba,4);}
+            else if(kind==1) {const float value=.1F/3.F;std::memcpy(pixel,&value,4);}
         }
         upload->Unmap(0,nullptr);
-        auto barrier=transition(targets[i],D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
+        auto barrier=transition(target,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
         list->ResourceBarrier(1,&barrier);
         D3D12_TEXTURE_COPY_LOCATION source{},destination{};
         source.pResource=upload.Get();source.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         source.PlacedFootprint=footprint;
-        destination.pResource=targets[i];destination.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        destination.pResource=target;destination.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         list->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
         std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
         list->ResourceBarrier(1,&barrier);uploads.push_back(upload);
-    }
+    };
+    for(UINT i=0;i<targets.size();++i)upload_texture(targets[i],i<2?0:i==2?1:2);
     check(list->Close(),"OSR upload close");
     ID3D12CommandList* lists[]{list.Get()};queue->ExecuteCommandLists(1,lists);
     ComPtr<ID3D12Fence> fence;
@@ -226,26 +227,14 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue,
         texture(63,63,DXGI_FORMAT_R32_FLOAT)};
     std::array native_motion{texture(first_extent,first_extent,DXGI_FORMAT_R16G16_FLOAT),
         texture(63,63,DXGI_FORMAT_R16G16_FLOAT)};
+    auto native_color=texture(63,63,DXGI_FORMAT_R8G8B8A8_UNORM);
     check(allocator->Reset(),"native grid copy allocator");
     check(list->Reset(allocator.Get(),nullptr),"native grid copy list");
-    for(unsigned eye=0;eye<2;++eye)for(unsigned kind=0;kind<2;++kind) {
-        auto* src=kind?motion.Get():depth.Get();
-        auto* dst=kind?native_motion[eye].Get():native_depths[eye].Get();
-        auto source_barrier=transition(src,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
-        auto destination_barrier=transition(dst,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
-        const D3D12_RESOURCE_BARRIER barriers[]{source_barrier,destination_barrier};
-        list->ResourceBarrier(2,barriers);
-        D3D12_TEXTURE_COPY_LOCATION source{},destination{};
-        source.pResource=src;source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        destination.pResource=dst;destination.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        const auto description=dst->GetDesc();
-        const D3D12_BOX box{0,0,0,static_cast<UINT>(description.Width),description.Height,1};
-        list->CopyTextureRegion(&destination,0,0,0,&source,&box);
-        std::swap(source_barrier.Transition.StateBefore,source_barrier.Transition.StateAfter);
-        std::swap(destination_barrier.Transition.StateBefore,destination_barrier.Transition.StateAfter);
-        const D3D12_RESOURCE_BARRIER restore[]{source_barrier,destination_barrier};
-        list->ResourceBarrier(2,restore);
+    for(unsigned eye=0;eye<2;++eye) {
+        upload_texture(native_depths[eye].Get(),1);
+        upload_texture(native_motion[eye].Get(),2);
     }
+    upload_texture(native_color.Get(),0);
     check(list->Close(),"native grid copy close");queue->ExecuteCommandLists(1,lists);wait(20);
     xrfg::OsrFullWarp warp;
     std::array<ID3D12Resource*,2> scratch{};
@@ -263,7 +252,7 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue,
         check(list->Reset(allocator.Get(),nullptr),"history oracle list");
         xrfg::OsrFullWarp::Inputs in{};
         in.source_eye=eye;in.source_depth=native_depths[eye].Get();
-        in.source_color=colors[1].Get();in.source_motion=native_motion[eye].Get();
+        in.source_color=native_color.Get();in.source_motion=native_motion[eye].Get();
         in.source_depth_state=in.source_color_state=in.source_motion_state=D3D12_RESOURCE_STATE_COMMON;
         in.use_history=n>=2;in.use_history_motion=n>=4;
         for(unsigned i=0;i<16;i+=5) {
@@ -305,9 +294,11 @@ void osr_extent_synthesis_checks(ID3D12Device* device,ID3D12CommandQueue* queue,
             UINT tag{};
             std::memcpy(&tag,static_cast<const unsigned char*>(data)+footprint.Offset+
                 y*footprint.Footprint.RowPitch+x*sizeof(UINT),sizeof(tag));
-            history_pixels+=tag==2;
+            history_pixels+=(tag&3u)==2u;
         }
         readback->Unmap(0,nullptr);
+        std::cerr<<"Native history oracle publication="<<n<<" eye="<<eye
+            <<" history_pixels="<<history_pixels<<'\n';
         if(n>=3)require(history_pixels>=63,
             "native history shaders did not fill the stereo-disocclusion band");
     }
